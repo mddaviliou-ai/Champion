@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NEXUS ARENA - 動態電競賽程引擎</title>
+    <title>WakuWaku Family - 動態電競賽程引擎</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Lucide Icons -->
@@ -63,6 +63,15 @@
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, onSnapshot, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
+        // ==========================================
+        // 🔒 登入帳號與密碼設定 (您可以在這裡自行更改)
+        // ==========================================
+        const APP_USERNAME = "Za";
+        const APP_PASSWORD = "waku";
+        
+        // 取得當前登入狀態
+        let isLoggedIn = localStorage.getItem('waku_logged_in') === 'true';
+
         const isLocalMode = window.location.protocol === 'file:';
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'dynamic-tournament-html';
 
@@ -98,7 +107,6 @@
                 const saved = localStorage.getItem('tournament_state');
                 if (saved) {
                     appState = JSON.parse(saved);
-                    // 確保舊資料相容
                     if (!appState.voters) appState.voters = []; 
                 }
                 isLoading = false;
@@ -118,6 +126,29 @@
             }
         }
 
+        // --- 登入邏輯 ---
+        window.handleLogin = () => {
+            const u = document.getElementById('loginUsername').value.trim();
+            const p = document.getElementById('loginPassword').value.trim();
+            if (u === APP_USERNAME && p === APP_PASSWORD) {
+                isLoggedIn = true;
+                localStorage.setItem('waku_logged_in', 'true');
+                isLoading = true;
+                render(); // 先渲染 Loading 畫面
+                initApp(); // 登入成功後才初始化讀取資料庫
+            } else {
+                document.getElementById('loginError').classList.remove('hidden');
+            }
+        };
+
+        window.handleLogout = () => {
+            if(confirm("確定要登出系統嗎？")) {
+                isLoggedIn = false;
+                localStorage.removeItem('waku_logged_in');
+                render();
+            }
+        };
+
         // --- 儲存狀態 ---
         async function saveState() {
             if (isLocalMode) {
@@ -135,19 +166,15 @@
             return result;
         }
 
-        // --- 取得當前存活玩家 (用於 8 強判斷，修改為「僅限勝部」) ---
         function getAlivePlayers() {
             if (!appState || appState.matches.length === 0) return [];
             
-            // 抓出所有曾參賽的玩家
             const allPlayersMap = new Map();
             appState.matches.forEach(m => m.participants.forEach(p => { if (p) allPlayersMap.set(p.id, p); }));
 
-            // 抓出「已經不是勝部狀態」的玩家 ID
             const nonWinnersIds = new Set();
             
             appState.matches.forEach(m => {
-                // 如果是勝部比賽，且已經結算，把輸家標記為非勝部
                 if (m.bracket === 'winners' && m.status === 'completed') {
                     m.participants.forEach(p => {
                         if (p && p.id !== m.winnerId) {
@@ -157,7 +184,6 @@
                 }
             });
 
-            // 回傳仍在勝部的存活者清單
             return Array.from(allPlayersMap.values()).filter(p => !nonWinnersIds.has(p.id));
         }
 
@@ -223,7 +249,6 @@
                 alert("勝部已經只剩最後一人，無法再產生下一輪了！"); return;
             }
 
-            // 讀取管理員自訂的下一輪人數
             const customSizeInput = document.getElementById('nextSize_winners');
             const customSize = customSizeInput ? parseInt(customSizeInput.value) : appState.config.groupSize;
 
@@ -249,7 +274,6 @@
                 alert("敗部待戰區人數不足，無法產生賽事！(目前 " + appState.losersPool.length + " 人)"); return;
             }
 
-            // 讀取管理員自訂的下一輪人數
             const customSizeInput = document.getElementById('nextSize_losers');
             const customSize = customSizeInput ? parseInt(customSizeInput.value) : appState.config.groupSize;
 
@@ -287,7 +311,7 @@
 
         window.setTab = (tabName) => {
             activeTab = tabName;
-            selectedVoterId = null; // 切換標籤時清除選取狀態
+            selectedVoterId = null; 
             render();
         };
 
@@ -310,18 +334,17 @@
         };
 
         window.selectVoter = (voterId) => {
-            // 切換選取狀態
             selectedVoterId = selectedVoterId === voterId ? null : voterId;
             render();
         };
 
         window.assignVoteToPlayer = (playerId) => {
-            if (!selectedVoterId) return; // 如果沒有選取投票者則忽略點擊
+            if (!selectedVoterId) return; 
 
             const voterIndex = appState.voters.findIndex(v => v.id === selectedVoterId);
             if (voterIndex !== -1) {
                 appState.voters[voterIndex].votedFor = playerId;
-                selectedVoterId = null; // 分配後自動取消選取
+                selectedVoterId = null; 
                 saveState();
             }
         };
@@ -334,14 +357,65 @@
             }
         };
 
+        // --- UI 渲染邏輯 ---
+        function renderLoginScreen() {
+            return `
+                <div class="min-h-[80vh] flex items-center justify-center">
+                    <div class="glass-panel p-10 rounded-3xl w-full max-w-md shadow-2xl relative overflow-hidden border border-purple-500/20">
+                        <div class="absolute -top-10 -left-10 w-40 h-40 bg-indigo-500/20 rounded-full blur-3xl pointer-events-none"></div>
+                        <div class="absolute -bottom-10 -right-10 w-40 h-40 bg-purple-500/20 rounded-full blur-3xl pointer-events-none"></div>
+
+                        <div class="relative z-10 flex flex-col items-center mb-8">
+                            <div class="bg-gradient-to-br from-indigo-500 to-purple-600 p-3.5 rounded-2xl shadow-lg shadow-indigo-500/40 mb-5 border border-white/10">
+                                <i data-lucide="lock" class="w-10 h-10 text-white"></i>
+                            </div>
+                            <h2 class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 mb-2">WakuWaku Family</h2>
+                            <p class="text-slate-400 text-sm font-bold tracking-widest uppercase">系統安全登入</p>
+                        </div>
+
+                        <div class="space-y-5 relative z-10">
+                            <div>
+                                <label class="block text-sm font-bold text-slate-300 mb-2">管理員帳號</label>
+                                <div class="relative">
+                                    <i data-lucide="user" class="absolute left-3 top-3.5 w-5 h-5 text-slate-500"></i>
+                                    <input type="text" id="loginUsername" class="w-full bg-slate-900/80 border border-slate-700 rounded-xl py-3 pl-10 pr-4 text-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all shadow-inner" placeholder="請輸入帳號" onkeypress="if(event.key === 'Enter') document.getElementById('loginPassword').focus()">
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-bold text-slate-300 mb-2">系統密碼</label>
+                                <div class="relative">
+                                    <i data-lucide="key-round" class="absolute left-3 top-3.5 w-5 h-5 text-slate-500"></i>
+                                    <input type="password" id="loginPassword" class="w-full bg-slate-900/80 border border-slate-700 rounded-xl py-3 pl-10 pr-4 text-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all shadow-inner" placeholder="請輸入密碼" onkeypress="if(event.key === 'Enter') window.handleLogin()">
+                                </div>
+                            </div>
+                            <div id="loginError" class="text-rose-400 bg-rose-500/10 border border-rose-500/30 rounded-lg py-2 text-sm font-bold hidden text-center shadow-inner">
+                                <i data-lucide="alert-circle" class="w-4 h-4 inline mr-1"></i> 帳號或密碼錯誤
+                            </div>
+                            <button onclick="window.handleLogin()" class="w-full py-3.5 mt-6 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-xl font-black text-lg transition-all shadow-lg shadow-indigo-600/40 flex justify-center items-center">
+                                <i data-lucide="log-in" class="w-5 h-5 mr-2"></i> 登入系統
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
         function render() {
             const appDiv = document.getElementById('app');
+            
+            // 阻擋未登入狀態
+            if (!isLoggedIn) {
+                appDiv.innerHTML = renderLoginScreen();
+                lucide.createIcons();
+                return;
+            }
+
             if (isLoading) {
                 appDiv.innerHTML = `<div class="flex items-center justify-center min-h-[80vh] text-indigo-400"><i data-lucide="loader-2" class="animate-spin w-10 h-10"></i></div>`;
                 lucide.createIcons(); return;
             }
 
-            // 全域 Header (包含 Logo 與 GitHub 連結)
+            // 全域 Header (包含 Logo 與登出按鈕)
             let baseHtml = `
                 <div class="max-w-7xl mx-auto mb-8">
                     <nav class="glass-panel px-6 py-4 rounded-2xl flex justify-between items-center relative overflow-hidden">
@@ -351,21 +425,21 @@
                         <!-- Logo Area -->
                         <div class="flex items-center space-x-4 relative z-10">
                             <div class="bg-gradient-to-br from-indigo-500 to-purple-600 p-2.5 rounded-xl shadow-lg shadow-indigo-500/40 border border-white/10">
-                                <i data-lucide="gamepad-2" class="w-7 h-7 text-white animate-pulse"></i>
+                                <i data-lucide="gamepad-2" class="w-7 h-7 text-white"></i>
                             </div>
                             <div class="flex flex-col">
                                 <span class="text-2xl font-black bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 tracking-widest uppercase" style="text-shadow: 0 0 20px rgba(168,85,247,0.3);">
-                                    Nexus Arena
+                                    WakuWaku Family
                                 </span>
                                 <span class="text-[10px] text-slate-400 font-bold tracking-widest uppercase">Esports Tournament Engine</span>
                             </div>
                         </div>
 
-                        <!-- GitHub Button -->
-                        <a href="https://github.com" target="_blank" class="relative z-10 flex items-center space-x-2 bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white px-4 py-2 rounded-full border border-slate-600 transition-all shadow-md group">
-                            <i data-lucide="github" class="w-5 h-5 group-hover:scale-110 transition-transform"></i>
-                            <span class="text-sm font-bold hidden sm:inline">Star on GitHub</span>
-                        </a>
+                        <!-- 登出按鈕 -->
+                        <button onclick="window.handleLogout()" class="relative z-10 flex items-center space-x-2 bg-slate-800/80 hover:bg-rose-900/50 text-slate-300 hover:text-rose-400 px-4 py-2 rounded-full border border-slate-600 hover:border-rose-500/50 transition-all shadow-md group">
+                            <i data-lucide="log-out" class="w-4 h-4 group-hover:-translate-x-1 transition-transform"></i>
+                            <span class="text-sm font-bold hidden sm:inline">登出</span>
+                        </button>
                     </nav>
                 </div>
             `;
@@ -437,7 +511,7 @@
                                 <label class="block text-sm font-bold text-slate-300 mb-2 flex items-center">
                                     <i data-lucide="users" class="w-4 h-4 mr-2 text-indigo-400"></i> 1. 參賽玩家名單
                                 </label>
-                                <textarea id="playerList" rows="8" class="w-full bg-slate-900/80 border border-slate-700 rounded-xl p-4 text-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none resize-y shadow-inner" placeholder="請輸入玩家名稱，每行一個...\n\nEx:\nFaker\nChovy\nShowMaker\n..."></textarea>
+                                <textarea id="playerList" rows="8" class="w-full bg-slate-900/80 border border-slate-700 rounded-xl p-4 text-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none resize-y shadow-inner" placeholder="請輸入玩家名稱，每行一個...\n\nEx:\n玩家A\n玩家B\n玩家C\n..."></textarea>
                             </div>
 
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-800/30 p-5 rounded-2xl border border-slate-700/50">
@@ -760,8 +834,13 @@
             return html;
         }
 
-        // 啟動應用
-        initApp();
+        // 啟動應用前，先判斷登入狀態再決定是否讀取資料
+        if (isLoggedIn) {
+            initApp();
+        } else {
+            isLoading = false;
+            render();
+        }
 
     </script>
 </body>
