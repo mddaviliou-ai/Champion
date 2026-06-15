@@ -64,36 +64,36 @@
         import { getFirestore, doc, onSnapshot, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // ==========================================
-        // 🔒 登入帳號與密碼設定 (您可以在這裡自行更改)
+        // 🔒 登入帳號與密碼設定
         // ==========================================
         const APP_USERNAME = "Za";
         const APP_PASSWORD = "waku";
         
-        // 取得當前登入狀態
         let isLoggedIn = localStorage.getItem('waku_logged_in') === 'true';
-
         const isLocalMode = window.location.protocol === 'file:';
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'dynamic-tournament-html';
 
-        // --- 核心狀態 ---
         let appState = {
             config: { groupSize: 2, isDoubleElim: false },
             matches: [],
-            losersPool: [], // 敗部待戰區
-            voters: [] // 投票者名單 { id, name, votedFor: null }
+            losersPool: [],
+            voters: []
         };
         let isLoading = true;
-        let activeTab = 'board'; // 'board' (賽程) | 'voting' (投票)
-        let selectedVoterId = null; // 記錄當前選取的投票者，用於分配
+        let activeTab = 'board';
+        let selectedVoterId = null;
 
-        // --- Firebase 設定 ---
+        // --- Firebase 設定 (補齊完整金鑰) ---
         let db, auth;
         if (!isLocalMode) {
             try {
-                const config = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+                const config = {
                     apiKey: "AIzaSyA2xUt1tsmv6xJPeUAVrt4LpP7JtJJUGJk",
                     authDomain: "champion-3ceb6.firebaseapp.com",
-                    projectId: "champion-3ceb6"
+                    projectId: "champion-3ceb6",
+                    storageBucket: "champion-3ceb6.firebasestorage.app",
+                    messagingSenderId: "818995966538",
+                    appId: "1:818995966538:web:a9828d6da67b01820e6cb3"
                 };
                 const fbApp = initializeApp(config);
                 auth = getAuth(fbApp);
@@ -101,7 +101,7 @@
             } catch (e) { console.error("Firebase Init Error:", e); }
         }
 
-        // --- 系統初始化 ---
+        // --- 系統初始化 (加入畫面防呆除錯機制) ---
         async function initApp() {
             if (isLocalMode) {
                 const saved = localStorage.getItem('tournament_state');
@@ -112,7 +112,10 @@
                 isLoading = false;
                 render();
             } else {
-                signInAnonymously(auth).then(() => {
+                try {
+                    // 嘗試匿名登入 Firebase
+                    await signInAnonymously(auth);
+                    
                     const stateRef = doc(db, 'artifacts', appId, 'public', 'tournament_state');
                     onSnapshot(stateRef, (docSnap) => {
                         if (docSnap.exists()) {
@@ -121,8 +124,43 @@
                         }
                         isLoading = false;
                         render();
+                    }, (error) => {
+                        // Firestore 讀取失敗時的畫面
+                        console.error("Firestore Error:", error);
+                        document.getElementById('app').innerHTML = `
+                            <div class="flex items-center justify-center min-h-[80vh]">
+                                <div class="bg-slate-800 p-8 rounded-2xl border border-rose-500 text-center shadow-2xl max-w-lg">
+                                    <i data-lucide="database" class="w-12 h-12 text-rose-500 mx-auto mb-4"></i>
+                                    <h2 class="text-xl font-bold text-white mb-2">資料庫連線失敗</h2>
+                                    <p class="text-slate-400 text-sm">${error.message}</p>
+                                </div>
+                            </div>`;
+                        lucide.createIcons();
                     });
-                }).catch(e => console.error("Auth Error", e));
+                } catch (e) {
+                    // Auth 登入失敗時的畫面 (通常是 Vercel 網域未授權)
+                    console.error("Auth Error:", e);
+                    let errorMsg = e.message;
+                    if (e.code === 'auth/unauthorized-domain') {
+                        errorMsg = `
+                            您的網域 <strong class="text-amber-400">${window.location.hostname}</strong> 尚未被 Firebase 允許連線。<br><br>
+                            <span class="text-white">請前往 Firebase 後台解鎖：</span><br>
+                            1. 左側選單點擊 <b>Authentication</b><br>
+                            2. 點擊上方的 <b>Settings (設定)</b> 頁籤<br>
+                            3. 點擊 <b>Authorized domains (授權網域)</b><br>
+                            4. 點擊 Add domain，並輸入 <code>${window.location.hostname}</code>
+                        `;
+                    }
+                    document.getElementById('app').innerHTML = `
+                        <div class="flex items-center justify-center min-h-[80vh]">
+                            <div class="bg-slate-800 p-8 rounded-2xl border border-rose-500 text-center shadow-2xl max-w-lg">
+                                <i data-lucide="shield-alert" class="w-12 h-12 text-rose-500 mx-auto mb-4 animate-pulse"></i>
+                                <h2 class="text-xl font-bold text-white mb-4">Firebase 安全性阻擋</h2>
+                                <p class="text-slate-300 text-sm leading-relaxed text-left bg-slate-900 p-4 rounded-lg border border-slate-700">${errorMsg}</p>
+                            </div>
+                        </div>`;
+                    lucide.createIcons();
+                }
             }
         }
 
@@ -134,8 +172,8 @@
                 isLoggedIn = true;
                 localStorage.setItem('waku_logged_in', 'true');
                 isLoading = true;
-                render(); // 先渲染 Loading 畫面
-                initApp(); // 登入成功後才初始化讀取資料庫
+                render(); 
+                initApp(); 
             } else {
                 document.getElementById('loginError').classList.remove('hidden');
             }
@@ -168,12 +206,10 @@
 
         function getAlivePlayers() {
             if (!appState || appState.matches.length === 0) return [];
-            
             const allPlayersMap = new Map();
             appState.matches.forEach(m => m.participants.forEach(p => { if (p) allPlayersMap.set(p.id, p); }));
 
             const nonWinnersIds = new Set();
-            
             appState.matches.forEach(m => {
                 if (m.bracket === 'winners' && m.status === 'completed') {
                     m.participants.forEach(p => {
@@ -183,7 +219,6 @@
                     });
                 }
             });
-
             return Array.from(allPlayersMap.values()).filter(p => !nonWinnersIds.has(p.id));
         }
 
@@ -357,7 +392,6 @@
             }
         };
 
-        // --- UI 渲染邏輯 ---
         function renderLoginScreen() {
             return `
                 <div class="min-h-[80vh] flex items-center justify-center">
@@ -403,7 +437,6 @@
         function render() {
             const appDiv = document.getElementById('app');
             
-            // 阻擋未登入狀態
             if (!isLoggedIn) {
                 appDiv.innerHTML = renderLoginScreen();
                 lucide.createIcons();
@@ -415,7 +448,6 @@
                 lucide.createIcons(); return;
             }
 
-            // 全域 Header (包含 Logo 與登出按鈕)
             let baseHtml = `
                 <div class="max-w-7xl mx-auto mb-8">
                     <nav class="glass-panel px-6 py-4 rounded-2xl flex justify-between items-center relative overflow-hidden">
@@ -425,7 +457,7 @@
                         <!-- Logo Area -->
                         <div class="flex items-center space-x-4 relative z-10">
                             <div class="bg-gradient-to-br from-indigo-500 to-purple-600 p-2.5 rounded-xl shadow-lg shadow-indigo-500/40 border border-white/10">
-                                <i data-lucide="gamepad-2" class="w-7 h-7 text-white"></i>
+                                <i data-lucide="gamepad-2" class="w-7 h-7 text-white animate-pulse"></i>
                             </div>
                             <div class="flex flex-col">
                                 <span class="text-2xl font-black bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 tracking-widest uppercase" style="text-shadow: 0 0 20px rgba(168,85,247,0.3);">
@@ -438,7 +470,7 @@
                         <!-- 登出按鈕 -->
                         <button onclick="window.handleLogout()" class="relative z-10 flex items-center space-x-2 bg-slate-800/80 hover:bg-rose-900/50 text-slate-300 hover:text-rose-400 px-4 py-2 rounded-full border border-slate-600 hover:border-rose-500/50 transition-all shadow-md group">
                             <i data-lucide="log-out" class="w-4 h-4 group-hover:-translate-x-1 transition-transform"></i>
-                            <span class="text-sm font-bold hidden sm:inline">登出</span>
+                            <span class="text-sm font-bold hidden sm:inline">登出系統</span>
                         </button>
                     </nav>
                 </div>
@@ -449,7 +481,6 @@
             } else {
                 baseHtml += `
                     <div class="max-w-7xl mx-auto space-y-8">
-                        <!-- 頂部導覽列 (控制面板) -->
                         <div class="glass-panel p-6 rounded-2xl flex flex-col md:flex-row justify-between items-center shadow-xl">
                             <div class="flex items-center mb-6 md:mb-0">
                                 <div class="bg-slate-800 p-3 rounded-xl border border-slate-600 shadow-inner mr-4">
@@ -478,7 +509,6 @@
                             </button>
                         </div>
 
-                        <!-- 內容區域 -->
                         ${activeTab === 'board' ? renderBoardScreen() : renderVotingScreen()}
                     </div>
                 `;
@@ -491,7 +521,6 @@
         function renderSetupScreen() {
             return `
                 <div class="max-w-2xl mx-auto mt-4 relative">
-                    <!-- 背景光暈裝飾 -->
                     <div class="absolute -top-10 -left-10 w-40 h-40 bg-indigo-500/20 rounded-full blur-3xl pointer-events-none"></div>
                     <div class="absolute -bottom-10 -right-10 w-40 h-40 bg-purple-500/20 rounded-full blur-3xl pointer-events-none"></div>
 
@@ -547,11 +576,8 @@
             const losers = appState.matches.filter(m => m.bracket === 'losers');
 
             let html = `<div class="space-y-10">`;
-
-            // 勝部區塊
             html += renderBracketGroup('勝部賽程 (Winners Bracket)', 'indigo', winners, 'winners');
 
-            // 敗部區塊
             if (appState.config.isDoubleElim) {
                 html += renderBracketGroup(`敗部賽程 (Losers Bracket)`, 'rose', losers, 'losers');
             }
@@ -604,7 +630,6 @@
                 });
             }
 
-            // 動態產生下一輪的操作列
             const actionBtnLogic = bracketType === 'winners' ? 'window.generateNextWinnersRound()' : 'window.generateNextLosersRound()';
             const inputId = bracketType === 'winners' ? 'nextSize_winners' : 'nextSize_losers';
             
@@ -665,7 +690,6 @@
 
                 const clickEvent = !isCompleted ? `onclick="window.resolveMatch('${match.id}', '${player.id}')"` : '';
 
-                // 趣味圖示判斷
                 let iconHtml = '';
                 if (isWinner) {
                     iconHtml = `<i data-lucide="crown" class="w-4 h-4 text-yellow-400 mr-2 animate-bounce"></i>`;
@@ -712,7 +736,6 @@
 
             let html = `<div class="space-y-6">`;
 
-            // 狀態列
             html += `
                 <div class="flex justify-between items-center bg-slate-800 p-5 rounded-2xl border border-slate-700 shadow-lg">
                     <div class="flex items-center">
@@ -742,7 +765,6 @@
                     <div class="grid grid-cols-1 lg:grid-cols-4 gap-8 mt-6">
                 `;
 
-                // 左欄：未分配名單
                 html += `
                     <div class="lg:col-span-1 glass-panel p-6 rounded-2xl border border-slate-700 max-h-[600px] overflow-y-auto">
                         <h3 class="font-black text-slate-300 mb-5 border-b border-slate-700/50 pb-3 flex items-center">
@@ -760,7 +782,6 @@
                     </div>
                 `;
 
-                // 右欄：選手卡片
                 html += `<div class="lg:col-span-3 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-5">`;
                 
                 alivePlayers.forEach(player => {
@@ -770,7 +791,6 @@
 
                     html += `
                         <div ${cardAction} class="player-card p-5 rounded-2xl border transition-all ${selectableClass} shadow-lg relative overflow-hidden group">
-                            <!-- 裝飾背景色塊 -->
                             <div class="absolute top-0 right-0 w-24 h-24 bg-purple-500/10 rounded-full blur-2xl -mr-10 -mt-10 pointer-events-none"></div>
 
                             <div class="flex justify-between items-center mb-5 border-b border-slate-700/50 pb-4 relative z-10">
@@ -834,7 +854,6 @@
             return html;
         }
 
-        // 啟動應用前，先判斷登入狀態再決定是否讀取資料
         if (isLoggedIn) {
             initApp();
         } else {
