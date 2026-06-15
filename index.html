@@ -127,12 +127,29 @@
                     }, (error) => {
                         // Firestore 讀取失敗時的畫面
                         console.error("Firestore Error:", error);
+                        let errMsg = error.message;
+                        let errTitle = "資料庫連線失敗";
+                        
+                        // 🌟 優化：針對「正式規則 (if false)」的權限錯誤進行精準提示
+                        if (error.code === 'permission-denied') {
+                            errTitle = "Firestore 權限被拒絕";
+                            errMsg = `
+                                您目前的 Firestore 安全性規則可能設定為 <code>if false;</code>，導致網頁無法讀取資料。<br><br>
+                                <span class="text-white">請前往 Firebase 控制台修改規則：</span><br>
+                                1. 點擊左側 <b>Firestore Database</b><br>
+                                2. 切換到 <b>規則 (Rules)</b> 頁籤<br>
+                                3. 將 <code>allow read, write: if false;</code><br>
+                                   改為 <code class="text-emerald-400 font-bold">allow read, write: if request.auth != null;</code><br>
+                                4. 點擊<b>發布 (Publish)</b>
+                            `;
+                        }
+
                         document.getElementById('app').innerHTML = `
                             <div class="flex items-center justify-center min-h-[80vh]">
                                 <div class="bg-slate-800 p-8 rounded-2xl border border-rose-500 text-center shadow-2xl max-w-lg">
                                     <i data-lucide="database" class="w-12 h-12 text-rose-500 mx-auto mb-4"></i>
-                                    <h2 class="text-xl font-bold text-white mb-2">資料庫連線失敗</h2>
-                                    <p class="text-slate-400 text-sm">${error.message}</p>
+                                    <h2 class="text-xl font-bold text-white mb-4">${errTitle}</h2>
+                                    <p class="text-slate-300 text-sm leading-relaxed text-left bg-slate-900 p-4 rounded-lg border border-slate-700">${errMsg}</p>
                                 </div>
                             </div>`;
                         lucide.createIcons();
