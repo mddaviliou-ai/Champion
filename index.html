@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEXUS ARENA - 動態電競賽程引擎</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #0f172a; /* slate-900 */
+            color: #e2e8f0; /* slate-200 */
+            min-height: 100vh;
+            /* 科技感網格背景 */
+            background-image: 
+                radial-gradient(circle at 15% 50%, rgba(99, 102, 241, 0.15), transparent 25%),
+                radial-gradient(circle at 85% 30%, rgba(168, 85, 247, 0.15), transparent 25%),
+                linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+            background-size: 100% 100%, 100% 100%, 30px 30px, 30px 30px;
+        }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+        
+        /* 毛玻璃與光暈特效 */
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+        }
+        
+        /* 投票選取動畫 */
+        .voter-chip.selected {
+            ring: 2px;
+            ring-color: #f59e0b; /* amber-500 */
+            background-color: #78350f; /* amber-900 */
+            border-color: #f59e0b;
+            transform: scale(1.05);
+            box-shadow: 0 0 15px rgba(245, 158, 11, 0.4);
+        }
+        .player-card.selectable:hover {
+            border-color: #f59e0b;
+            box-shadow: 0 0 20px rgba(245, 158, 11, 0.3);
+            cursor: pointer;
+            transform: translateY(-2px);
+        }
+    </style>
+</head>
+<body class="relative">
+
+    <div id="app" class="p-4 md:p-8 relative z-10">
+        <!-- UI 渲染區域 -->
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const isLocalMode = window.location.protocol === 'file:';
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'dynamic-tournament-html';
+
+        // --- 核心狀態 ---
+        let appState = {
+            config: { groupSize: 2, isDoubleElim: false },
+            matches: [],
+            losersPool: [], // 敗部待戰區
+            voters: [] // 投票者名單 { id, name, votedFor: null }
+        };
+        let isLoading = true;
+        let activeTab = 'board'; // 'board' (賽程) | 'voting' (投票)
+        let selectedVoterId = null; // 記錄當前選取的投票者，用於分配
+
+        // --- Firebase 設定 ---
+        let db, auth;
+        if (!isLocalMode) {
+            try {
+                const config = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+                    apiKey: "AIzaSyA2xUt1tsmv6xJPeUAVrt4LpP7JtJJUGJk",
+                    authDomain: "champion-3ceb6.firebaseapp.com",
+                    projectId: "champion-3ceb6"
+                };
+                const fbApp = initializeApp(config);
+                auth = getAuth(fbApp);
+                db = getFirestore(fbApp);
+            } catch (e) { console.error("Firebase Init Error:", e); }
+        }
+
+        // --- 系統初始化 ---
+        async function initApp() {
+            if (isLocalMode) {
+                const saved = localStorage.getItem('tournament_state');
+                if (saved) {
+                    appState = JSON.parse(saved);
+                    // 確保舊資料相容
+                    if (!appState.voters) appState.voters = []; 
+                }
+                isLoading = false;
+                render();
+            } else {
+                signInAnonymously(auth).then(() => {
+                    const stateRef = doc(db, 'artifacts', appId, 'public', 'tournament_state');
+                    onSnapshot(stateRef, (docSnap) => {
+                        if (docSnap.exists()) {
+                            appState = docSnap.data();
+                            if (!appState.voters) appState.voters = [];
+                        }
+                        isLoading = false;
+                        render();
+                    });
+                }).catch(e => console.error("Auth Error", e));
+            }
+        }
+
+        // --- 儲存狀態 ---
+        async function saveState() {
+            if (isLocalMode) {
+                localStorage.setItem('tournament_state', JSON.stringify(appState));
+                render();
+            } else {
+                const stateRef = doc(db, 'artifacts', appId, 'public', 'tournament_state');
+                await setDoc(stateRef, appState);
+            }
+        }
+
+        function chunkArray(array, size) {
+            const result = [];
+            for (let i = 0; i < array.length; i += size) result.push(array.slice(i, i + size));
+            return result;
+        }
+
+        // --- 取得當前存活玩家 (用於 8 強判斷，修改為「僅限勝部」) ---
+        function getAlivePlayers() {
+            if (!appState || appState.matches.length === 0) return [];
+            
+            // 抓出所有曾參賽的玩家
+            const allPlayersMap = new Map();
+            appState.matches.forEach(m => m.participants.forEach(p => { if (p) allPlayersMap.set(p.id, p); }));
+
+            // 抓出「已經不是勝部狀態」的玩家 ID
+            const nonWinnersIds = new Set();
+            
+            appState.matches.forEach(m => {
+                // 如果是勝部比賽，且已經結算，把輸家標記為非勝部
+                if (m.bracket === 'winners' && m.status === 'completed') {
+                    m.participants.forEach(p => {
+                        if (p && p.id !== m.winnerId) {
+                            nonWinnersIds.add(p.id);
+                        }
+                    });
+                }
+            });
+
+            // 回傳仍在勝部的存活者清單
+            return Array.from(allPlayersMap.values()).filter(p => !nonWinnersIds.has(p.id));
+        }
+
+        window.startTournament = () => {
+            const namesText = document.getElementById('playerList').value;
+            const names = namesText.split('\n').map(n => n.trim()).filter(n => n !== '');
+            const groupSize = parseInt(document.getElementById('groupSize').value) || 2;
+            const isDoubleElim = document.getElementById('doubleElim').checked;
+
+            if (names.length < 2) { alert("請至少輸入 2 名參賽玩家！"); return; }
+
+            names.sort(() => Math.random() - 0.5);
+            const participants = names.map((name, i) => ({ id: 'p_' + Date.now() + '_' + i, name }));
+            const chunks = chunkArray(participants, groupSize);
+
+            const initialMatches = chunks.map((chunk, index) => ({
+                id: 'm_w_1_' + index,
+                bracket: 'winners',
+                round: 1,
+                title: `勝部 R1 - 第 ${index + 1} 場`,
+                participants: chunk,
+                winnerId: null,
+                status: 'pending'
+            }));
+
+            appState = { config: { groupSize, isDoubleElim }, matches: initialMatches, losersPool: [], voters: [] };
+            activeTab = 'board';
+            saveState();
+        };
+
+        window.resolveMatch = (matchId, winnerId) => {
+            const match = appState.matches.find(m => m.id === matchId);
+            if (!match || match.status === 'completed') return;
+
+            match.status = 'completed';
+            match.winnerId = winnerId;
+
+            if (appState.config.isDoubleElim) {
+                if (match.bracket === 'winners') {
+                    const losers = match.participants.filter(p => p.id !== winnerId);
+                    appState.losersPool.push(...losers);
+                } else if (match.bracket === 'losers') {
+                    const winner = match.participants.find(p => p.id === winnerId);
+                    if (winner) appState.losersPool.push(winner);
+                }
+            }
+            saveState();
+        };
+
+        window.generateNextWinnersRound = () => {
+            const winnersMatches = appState.matches.filter(m => m.bracket === 'winners');
+            if (winnersMatches.length === 0) return;
+            
+            const highestRound = Math.max(...winnersMatches.map(m => m.round));
+            const currentRoundMatches = winnersMatches.filter(m => m.round === highestRound);
+            
+            if (currentRoundMatches.some(m => m.status === 'pending')) {
+                alert("請先結算完本輪所有勝部賽事！"); return;
+            }
+
+            const advancingPlayers = currentRoundMatches.map(m => m.participants.find(p => p.id === m.winnerId)).filter(p => p);
+            if (advancingPlayers.length <= 1) {
+                alert("勝部已經只剩最後一人，無法再產生下一輪了！"); return;
+            }
+
+            // 讀取管理員自訂的下一輪人數
+            const customSizeInput = document.getElementById('nextSize_winners');
+            const customSize = customSizeInput ? parseInt(customSizeInput.value) : appState.config.groupSize;
+
+            const nextRound = highestRound + 1;
+            const chunks = chunkArray(advancingPlayers, customSize);
+
+            const newMatches = chunks.map((chunk, index) => ({
+                id: `m_w_${nextRound}_${index}_${Date.now()}`,
+                bracket: 'winners',
+                round: nextRound,
+                title: `勝部 R${nextRound} - 第 ${index + 1} 場`,
+                participants: chunk,
+                winnerId: null,
+                status: 'pending'
+            }));
+
+            appState.matches.push(...newMatches);
+            saveState();
+        };
+
+        window.generateNextLosersRound = () => {
+            if (appState.losersPool.length < 2) {
+                alert("敗部待戰區人數不足，無法產生賽事！(目前 " + appState.losersPool.length + " 人)"); return;
+            }
+
+            // 讀取管理員自訂的下一輪人數
+            const customSizeInput = document.getElementById('nextSize_losers');
+            const customSize = customSizeInput ? parseInt(customSizeInput.value) : appState.config.groupSize;
+
+            const losersMatches = appState.matches.filter(m => m.bracket === 'losers');
+            const highestRound = losersMatches.length > 0 ? Math.max(...losersMatches.map(m => m.round)) : 0;
+            const nextRound = highestRound + 1;
+
+            const playersToMatch = [...appState.losersPool];
+            playersToMatch.sort(() => Math.random() - 0.5); 
+            const chunks = chunkArray(playersToMatch, customSize);
+
+            const newMatches = chunks.map((chunk, index) => ({
+                id: `m_l_${nextRound}_${index}_${Date.now()}`,
+                bracket: 'losers',
+                round: nextRound,
+                title: `敗部 R${nextRound} - 第 ${index + 1} 場`,
+                participants: chunk,
+                winnerId: null,
+                status: 'pending'
+            }));
+
+            appState.matches.push(...newMatches);
+            appState.losersPool = []; 
+            saveState();
+        };
+
+        window.resetTournament = () => {
+            if(confirm("確定要刪除當前賽事並重新建立嗎？所有紀錄將會消失。")) {
+                appState = { config: { groupSize: 2, isDoubleElim: false }, matches: [], losersPool: [], voters: [] };
+                activeTab = 'board';
+                selectedVoterId = null;
+                saveState();
+            }
+        };
+
+        window.setTab = (tabName) => {
+            activeTab = tabName;
+            selectedVoterId = null; // 切換標籤時清除選取狀態
+            render();
+        };
+
+        window.setupVoters = () => {
+            const namesText = document.getElementById('voterInputList').value;
+            const names = namesText.split('\n').map(n => n.trim()).filter(n => n !== '');
+            if (names.length === 0) { alert("請至少輸入 1 名投票者！"); return; }
+
+            const newVoters = names.map((name, i) => ({ id: 'v_' + Date.now() + '_' + i, name: name, votedFor: null }));
+            appState.voters = [...(appState.voters || []), ...newVoters];
+            saveState();
+        };
+
+        window.resetVoters = () => {
+            if(confirm("確定要清空所有投票者名單嗎？這將會刪除所有分配紀錄。")) {
+                appState.voters = [];
+                selectedVoterId = null;
+                saveState();
+            }
+        };
+
+        window.selectVoter = (voterId) => {
+            // 切換選取狀態
+            selectedVoterId = selectedVoterId === voterId ? null : voterId;
+            render();
+        };
+
+        window.assignVoteToPlayer = (playerId) => {
+            if (!selectedVoterId) return; // 如果沒有選取投票者則忽略點擊
+
+            const voterIndex = appState.voters.findIndex(v => v.id === selectedVoterId);
+            if (voterIndex !== -1) {
+                appState.voters[voterIndex].votedFor = playerId;
+                selectedVoterId = null; // 分配後自動取消選取
+                saveState();
+            }
+        };
+
+        window.removeVote = (voterId) => {
+            const voterIndex = appState.voters.findIndex(v => v.id === voterId);
+            if (voterIndex !== -1) {
+                appState.voters[voterIndex].votedFor = null;
+                saveState();
+            }
+        };
+
+        function render() {
+            const appDiv = document.getElementById('app');
+            if (isLoading) {
+                appDiv.innerHTML = `<div class="flex items-center justify-center min-h-[80vh] text-indigo-400"><i data-lucide="loader-2" class="animate-spin w-10 h-10"></i></div>`;
+                lucide.createIcons(); return;
+            }
+
+            // 全域 Header (包含 Logo 與 GitHub 連結)
+            let baseHtml = `
+                <div class="max-w-7xl mx-auto mb-8">
+                    <nav class="glass-panel px-6 py-4 rounded-2xl flex justify-between items-center relative overflow-hidden">
+                        <!-- Header Background Glow -->
+                        <div class="absolute inset-0 bg-gradient-to-r from-indigo-500/10 via-purple-500/5 to-pink-500/10 pointer-events-none"></div>
+                        
+                        <!-- Logo Area -->
+                        <div class="flex items-center space-x-4 relative z-10">
+                            <div class="bg-gradient-to-br from-indigo-500 to-purple-600 p-2.5 rounded-xl shadow-lg shadow-indigo-500/40 border border-white/10">
+                                <i data-lucide="gamepad-2" class="w-7 h-7 text-white animate-pulse"></i>
+                            </div>
+                            <div class="flex flex-col">
+                                <span class="text-2xl font-black bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 tracking-widest uppercase" style="text-shadow: 0 0 20px rgba(168,85,247,0.3);">
+                                    Nexus Arena
+                                </span>
+                                <span class="text-[10px] text-slate-400 font-bold tracking-widest uppercase">Esports Tournament Engine</span>
+                            </div>
+                        </div>
+
+                        <!-- GitHub Button -->
+                        <a href="https://github.com" target="_blank" class="relative z-10 flex items-center space-x-2 bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white px-4 py-2 rounded-full border border-slate-600 transition-all shadow-md group">
+                            <i data-lucide="github" class="w-5 h-5 group-hover:scale-110 transition-transform"></i>
+                            <span class="text-sm font-bold hidden sm:inline">Star on GitHub</span>
+                        </a>
+                    </nav>
+                </div>
+            `;
+
+            if (appState.matches.length === 0) {
+                baseHtml += renderSetupScreen();
+            } else {
+                baseHtml += `
+                    <div class="max-w-7xl mx-auto space-y-8">
+                        <!-- 頂部導覽列 (控制面板) -->
+                        <div class="glass-panel p-6 rounded-2xl flex flex-col md:flex-row justify-between items-center shadow-xl">
+                            <div class="flex items-center mb-6 md:mb-0">
+                                <div class="bg-slate-800 p-3 rounded-xl border border-slate-600 shadow-inner mr-4">
+                                    <i data-lucide="layout-dashboard" class="w-6 h-6 text-indigo-400"></i>
+                                </div>
+                                <div>
+                                    <h1 class="text-xl font-bold text-white flex items-center">
+                                        賽事控制台 
+                                        ${isLocalMode ? `<span class="ml-3 px-2 py-1 bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-md text-[10px] font-bold flex items-center"><i data-lucide="wifi-off" class="w-3 h-3 mr-1"></i> 本地離線</span>` : ''}
+                                    </h1>
+                                    <p class="text-slate-400 text-sm mt-1 flex items-center"><i data-lucide="shield-check" class="w-4 h-4 mr-1 text-emerald-500"></i> 管理員權限</p>
+                                </div>
+                            </div>
+                            
+                            <div class="flex space-x-2 bg-slate-900/80 p-1.5 rounded-xl border border-slate-700">
+                                <button onclick="window.setTab('board')" class="px-6 py-2.5 rounded-lg text-sm font-bold transition-all ${activeTab === 'board' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-white hover:bg-slate-800'}">
+                                    <i data-lucide="swords" class="w-4 h-4 inline mr-2"></i> 賽程看板
+                                </button>
+                                <button onclick="window.setTab('voting')" class="px-6 py-2.5 rounded-lg text-sm font-bold transition-all ${activeTab === 'voting' ? 'bg-purple-600 text-white shadow-md' : 'text-slate-400 hover:text-white hover:bg-slate-800'}">
+                                    <i data-lucide="bar-chart-3" class="w-4 h-4 inline mr-2"></i> 預測分配
+                                </button>
+                            </div>
+                            
+                            <button onclick="window.resetTournament()" class="hidden md:flex px-4 py-2 bg-rose-600/10 text-rose-400 border border-rose-600/30 hover:bg-rose-600 hover:text-white rounded-lg text-xs font-bold transition-all items-center mt-4 md:mt-0 group">
+                                <i data-lucide="trash-2" class="w-4 h-4 mr-2 group-hover:animate-bounce"></i> 重置賽事
+                            </button>
+                        </div>
+
+                        <!-- 內容區域 -->
+                        ${activeTab === 'board' ? renderBoardScreen() : renderVotingScreen()}
+                    </div>
+                `;
+            }
+            
+            appDiv.innerHTML = baseHtml;
+            lucide.createIcons();
+        }
+
+        function renderSetupScreen() {
+            return `
+                <div class="max-w-2xl mx-auto mt-4 relative">
+                    <!-- 背景光暈裝飾 -->
+                    <div class="absolute -top-10 -left-10 w-40 h-40 bg-indigo-500/20 rounded-full blur-3xl pointer-events-none"></div>
+                    <div class="absolute -bottom-10 -right-10 w-40 h-40 bg-purple-500/20 rounded-full blur-3xl pointer-events-none"></div>
+
+                    <div class="glass-panel rounded-3xl p-8 shadow-2xl relative z-10 border border-indigo-500/20">
+                        <div class="flex items-center space-x-4 mb-8 border-b border-slate-700/50 pb-6">
+                            <div class="bg-slate-800 p-4 rounded-2xl shadow-inner border border-slate-600">
+                                <i data-lucide="sparkles" class="w-8 h-8 text-amber-400"></i>
+                            </div>
+                            <div>
+                                <h1 class="text-3xl font-bold text-white">建立全新賽事</h1>
+                                <p class="text-slate-400 mt-1">輸入大批名單，系統為您自動分組排程</p>
+                            </div>
+                        </div>
+
+                        <div class="space-y-6">
+                            <div>
+                                <label class="block text-sm font-bold text-slate-300 mb-2 flex items-center">
+                                    <i data-lucide="users" class="w-4 h-4 mr-2 text-indigo-400"></i> 1. 參賽玩家名單
+                                </label>
+                                <textarea id="playerList" rows="8" class="w-full bg-slate-900/80 border border-slate-700 rounded-xl p-4 text-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none resize-y shadow-inner" placeholder="請輸入玩家名稱，每行一個...\n\nEx:\nFaker\nChovy\nShowMaker\n..."></textarea>
+                            </div>
+
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-800/30 p-5 rounded-2xl border border-slate-700/50">
+                                <div>
+                                    <label class="block text-sm font-bold text-slate-300 mb-2">2. 首輪對戰人數</label>
+                                    <div class="relative">
+                                        <i data-lucide="crosshair" class="absolute left-3 top-3.5 w-5 h-5 text-slate-500"></i>
+                                        <input type="number" id="groupSize" min="2" value="2" class="w-full bg-slate-900 border border-slate-700 rounded-xl py-3 pl-10 pr-4 text-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none font-bold">
+                                    </div>
+                                    <p class="text-[10px] text-slate-500 mt-2">提示：後續每一輪都可以隨時改變對戰人數！</p>
+                                </div>
+                                <div class="flex items-end mb-6">
+                                    <label class="flex items-center space-x-3 cursor-pointer p-3.5 border border-slate-600 rounded-xl w-full bg-slate-800 hover:bg-slate-700 transition group shadow-md">
+                                        <input type="checkbox" id="doubleElim" class="w-5 h-5 rounded border-slate-500 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-slate-900 bg-slate-900">
+                                        <span class="text-slate-200 font-bold group-hover:text-white transition-colors flex items-center">
+                                            <i data-lucide="rotate-ccw" class="w-4 h-4 mr-2 text-purple-400"></i> 開啟敗部復活
+                                        </span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <button onclick="window.startTournament()" class="w-full py-4 mt-6 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-xl font-black text-lg transition-all shadow-lg shadow-indigo-600/40 flex justify-center items-center group">
+                                <i data-lucide="swords" class="w-6 h-6 mr-3 group-hover:animate-bounce"></i> 產生對戰表
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderBoardScreen() {
+            const winners = appState.matches.filter(m => m.bracket === 'winners');
+            const losers = appState.matches.filter(m => m.bracket === 'losers');
+
+            let html = `<div class="space-y-10">`;
+
+            // 勝部區塊
+            html += renderBracketGroup('勝部賽程 (Winners Bracket)', 'indigo', winners, 'winners');
+
+            // 敗部區塊
+            if (appState.config.isDoubleElim) {
+                html += renderBracketGroup(`敗部賽程 (Losers Bracket)`, 'rose', losers, 'losers');
+            }
+
+            html += `</div>`;
+            return html;
+        }
+
+        function renderBracketGroup(title, colorName, matches, bracketType) {
+            const colorClass = `text-${colorName}-400`;
+            const bgClass = `bg-${colorName}-500`;
+            const borderClass = `border-${colorName}-500/30`;
+            const iconName = bracketType === 'winners' ? 'trophy' : 'shield-alert';
+            
+            const rounds = {};
+            matches.forEach(m => {
+                if (!rounds[m.round]) rounds[m.round] = [];
+                rounds[m.round].push(m);
+            });
+
+            let sectionHtml = `
+                <section class="glass-panel p-6 md:p-8 rounded-2xl border ${borderClass}">
+                    <div class="flex justify-between items-center mb-8 pb-4 border-b border-slate-700/50">
+                        <h2 class="text-2xl font-black ${colorClass} flex items-center tracking-wide">
+                            <div class="p-2 bg-${colorName}-500/20 rounded-lg mr-3 border border-${colorName}-500/30">
+                                <i data-lucide="${iconName}" class="w-6 h-6"></i>
+                            </div>
+                            ${title}
+                        </h2>
+                    </div>
+            `;
+
+            if (Object.keys(rounds).length === 0) {
+                sectionHtml += `<div class="text-slate-500 text-center py-12 italic flex flex-col items-center"><i data-lucide="ghost" class="w-12 h-12 mb-3 opacity-50"></i> 尚未產生賽事</div>`;
+            } else {
+                Object.keys(rounds).sort((a,b) => a - b).forEach(roundNumber => {
+                    const roundMatches = rounds[roundNumber];
+                    sectionHtml += `
+                        <div class="mb-10 last:mb-0">
+                            <h3 class="text-sm font-black text-slate-300 mb-5 tracking-widest uppercase flex items-center">
+                                <span class="w-8 h-[1px] bg-slate-600 mr-3"></span>
+                                Round ${roundNumber}
+                                <span class="w-8 h-[1px] bg-slate-600 ml-3"></span>
+                            </h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+                                ${roundMatches.map(m => renderMatchCard(m)).join('')}
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+
+            // 動態產生下一輪的操作列
+            const actionBtnLogic = bracketType === 'winners' ? 'window.generateNextWinnersRound()' : 'window.generateNextLosersRound()';
+            const inputId = bracketType === 'winners' ? 'nextSize_winners' : 'nextSize_losers';
+            
+            let footerHtml = `
+                <div class="mt-8 p-5 bg-slate-900/80 rounded-2xl border border-slate-700/50 flex flex-col sm:flex-row justify-between items-center space-y-4 sm:space-y-0 shadow-inner">
+            `;
+            
+            if (bracketType === 'losers') {
+                footerHtml += `
+                    <div class="flex items-center">
+                        <span class="text-rose-400 font-bold mr-3 flex items-center"><i data-lucide="skull" class="w-4 h-4 mr-2"></i> 待戰區：</span>
+                        <span class="text-white text-sm bg-rose-600 px-3 py-1.5 rounded-lg shadow-lg shadow-rose-600/30 font-black">${appState.losersPool.length} 人</span>
+                    </div>`;
+            } else {
+                footerHtml += `<div class="flex items-center text-slate-400 text-sm font-medium"><i data-lucide="info" class="w-4 h-4 mr-2"></i> 所有比賽結算後可產生下一輪</div>`;
+            }
+
+            footerHtml += `
+                    <div class="flex items-center space-x-3 w-full sm:w-auto">
+                        <div class="flex items-center bg-slate-800 border border-slate-600 rounded-xl overflow-hidden px-3 py-2 shadow-inner">
+                            <span class="text-xs text-slate-400 mr-2 whitespace-nowrap font-bold">對戰人數:</span>
+                            <input type="number" id="${inputId}" value="${appState.config.groupSize}" min="2" class="bg-transparent text-${colorName}-400 w-12 outline-none font-black text-center text-lg">
+                        </div>
+                        <button onclick="${actionBtnLogic}" class="px-6 py-3 bg-${colorName}-600 hover:bg-${colorName}-500 text-white rounded-xl font-bold transition-all shadow-lg shadow-${colorName}-600/30 flex items-center whitespace-nowrap group">
+                            <i data-lucide="zap" class="w-4 h-4 mr-2 group-hover:scale-125 transition-transform"></i> 產生下一輪
+                        </button>
+                    </div>
+                </div>
+            `;
+
+            sectionHtml += footerHtml + `</section>`;
+            return sectionHtml;
+        }
+
+        function renderMatchCard(match) {
+            const isCompleted = match.status === 'completed';
+            let cardHtml = `
+                <div class="bg-slate-800/80 rounded-2xl border border-slate-700 overflow-hidden transition-all flex flex-col h-full shadow-lg hover:border-slate-500 hover:shadow-xl">
+                    <div class="bg-slate-900/80 px-4 py-2.5 flex justify-between items-center border-b border-slate-700">
+                        <span class="text-xs font-black text-slate-400 tracking-wider">${match.title}</span>
+                        ${isCompleted 
+                            ? `<span class="text-[10px] px-2 py-0.5 bg-emerald-500/20 text-emerald-400 rounded-full border border-emerald-500/20 uppercase font-bold tracking-widest flex items-center"><i data-lucide="check" class="w-3 h-3 mr-1"></i> 已結算</span>` 
+                            : `<span class="text-[10px] px-2 py-0.5 bg-blue-500/20 text-blue-400 rounded-full border border-blue-500/20 uppercase font-bold tracking-widest flex items-center"><i data-lucide="swords" class="w-3 h-3 mr-1"></i> 進行中</span>`
+                        }
+                    </div>
+                    <div class="p-3 flex-grow space-y-2 relative">
+            `;
+
+            match.participants.forEach(player => {
+                const isWinner = isCompleted && match.winnerId === player.id;
+                const isLoser = isCompleted && match.winnerId !== player.id;
+
+                let boxStyles = isWinner 
+                    ? 'bg-gradient-to-r from-emerald-900/40 to-slate-800 border-emerald-500/50 text-emerald-400 font-bold shadow-[inset_2px_0_0_#10b981]' 
+                    : isLoser 
+                        ? 'bg-slate-900/50 border-slate-800 text-slate-600 line-through opacity-50 shadow-[inset_2px_0_0_#475569]' 
+                        : 'bg-slate-700/30 border-slate-600 text-slate-200 hover:bg-slate-600 cursor-pointer shadow-[inset_2px_0_0_#3b82f6]';
+
+                const clickEvent = !isCompleted ? `onclick="window.resolveMatch('${match.id}', '${player.id}')"` : '';
+
+                // 趣味圖示判斷
+                let iconHtml = '';
+                if (isWinner) {
+                    iconHtml = `<i data-lucide="crown" class="w-4 h-4 text-yellow-400 mr-2 animate-bounce"></i>`;
+                } else if (isLoser) {
+                    iconHtml = `<i data-lucide="skull" class="w-4 h-4 text-slate-500 mr-2"></i>`;
+                } else {
+                    iconHtml = `<i data-lucide="swords" class="w-4 h-4 text-slate-400 mr-2 opacity-50"></i>`;
+                }
+
+                cardHtml += `
+                    <div ${clickEvent} class="flex items-center p-2.5 rounded-xl border transition-all ${boxStyles} group relative overflow-hidden">
+                        ${iconHtml}
+                        <span class="flex-grow text-sm font-medium truncate relative z-10">${player.name}</span>
+                        ${!isCompleted ? `<span class="opacity-0 group-hover:opacity-100 text-[10px] font-bold bg-blue-500 text-white px-2 py-1 rounded-md ml-2 relative z-10 transition-opacity">設為勝者</span>` : ''}
+                    </div>
+                `;
+            });
+            cardHtml += `</div></div>`;
+            return cardHtml;
+        }
+
+        function renderVotingScreen() {
+            if (!appState.voters || appState.voters.length === 0) {
+                return `
+                    <div class="glass-panel p-10 rounded-3xl max-w-2xl mx-auto border border-purple-500/20 shadow-2xl relative overflow-hidden">
+                        <div class="absolute -right-10 -top-10 opacity-10 pointer-events-none">
+                            <i data-lucide="bar-chart-3" class="w-64 h-64 text-purple-500"></i>
+                        </div>
+                        <h2 class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-400 mb-4 flex items-center relative z-10">
+                            <i data-lucide="users-2" class="mr-3 text-purple-400"></i> 匯入預測名單
+                        </h2>
+                        <p class="text-slate-400 text-sm mb-6 leading-relaxed relative z-10">請貼上參與賽事預測的觀眾名單。<br>當勝部賽事推進至 <strong class="text-amber-400">8 強（含）以內</strong> 時，將解鎖「點擊分配」功能，為預測者分派選票！</p>
+                        <textarea id="voterInputList" rows="6" class="w-full bg-slate-900/80 border border-slate-700 rounded-xl p-4 text-slate-200 focus:ring-2 focus:ring-purple-500 outline-none resize-y mb-6 shadow-inner relative z-10" placeholder="觀眾 A\n觀眾 B\n..."></textarea>
+                        <button onclick="window.setupVoters()" class="w-full py-4 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white rounded-xl font-black text-lg transition-all shadow-lg shadow-purple-600/30 flex justify-center items-center relative z-10">
+                            <i data-lucide="check-circle-2" class="w-6 h-6 mr-2"></i> 建立預測名單
+                        </button>
+                    </div>
+                `;
+            }
+
+            const alivePlayers = getAlivePlayers();
+            const unassignedVoters = appState.voters.filter(v => !v.votedFor);
+            const isTop8Phase = alivePlayers.length > 0 && alivePlayers.length <= 8;
+
+            let html = `<div class="space-y-6">`;
+
+            // 狀態列
+            html += `
+                <div class="flex justify-between items-center bg-slate-800 p-5 rounded-2xl border border-slate-700 shadow-lg">
+                    <div class="flex items-center">
+                        <div class="p-2 bg-slate-900 rounded-lg mr-4 border border-slate-700">
+                            <span class="text-slate-400 text-sm">勝部存活：<strong class="text-white text-xl ml-1">${alivePlayers.length}</strong> 人</span>
+                        </div>
+                        ${isTop8Phase 
+                            ? `<span class="px-4 py-1.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-lg shadow-orange-500/30 rounded-full text-xs font-black animate-pulse flex items-center"><i data-lucide="flame" class="w-4 h-4 mr-1"></i> 8 強預測解鎖</span>`
+                            : `<span class="px-4 py-1.5 bg-slate-700 text-slate-400 border border-slate-600 rounded-full text-xs font-bold flex items-center"><i data-lucide="lock" class="w-3 h-3 mr-1"></i> 等待推進至 8 強</span>`
+                        }
+                    </div>
+                    <button onclick="window.resetVoters()" class="text-xs text-slate-400 hover:text-rose-400 underline flex items-center transition-colors">
+                        <i data-lucide="trash" class="w-3 h-3 mr-1"></i> 清空名單
+                    </button>
+                </div>
+            `;
+
+            if (isTop8Phase) {
+                html += `
+                    <div class="bg-blue-900/20 border border-blue-500/30 p-4 rounded-xl text-blue-300 text-sm flex items-start shadow-inner">
+                        <i data-lucide="info" class="w-5 h-5 mr-3 flex-shrink-0 mt-0.5 text-blue-400"></i>
+                        <div>
+                            <p class="font-bold mb-1 text-blue-200">極速分配指南</p>
+                            <p class="text-blue-300/80">1. 點擊左側「待分配者」使其發光。<br>2. 點擊右側「選手卡片」，完成選票綁定！</p>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 lg:grid-cols-4 gap-8 mt-6">
+                `;
+
+                // 左欄：未分配名單
+                html += `
+                    <div class="lg:col-span-1 glass-panel p-6 rounded-2xl border border-slate-700 max-h-[600px] overflow-y-auto">
+                        <h3 class="font-black text-slate-300 mb-5 border-b border-slate-700/50 pb-3 flex items-center">
+                            <i data-lucide="user-plus" class="w-5 h-5 mr-2 text-indigo-400"></i> 待分配 (${unassignedVoters.length})
+                        </h3>
+                        <div class="flex flex-wrap gap-2.5">
+                            ${unassignedVoters.map(v => `
+                                <button onclick="window.selectVoter('${v.id}')" 
+                                        class="voter-chip px-3 py-1.5 rounded-lg text-sm font-bold transition-all border shadow-sm ${selectedVoterId === v.id ? 'selected' : 'bg-slate-800 text-slate-300 border-slate-600 hover:bg-slate-700'}">
+                                    ${v.name}
+                                </button>
+                            `).join('')}
+                            ${unassignedVoters.length === 0 ? '<div class="flex flex-col items-center justify-center w-full py-10 opacity-50"><i data-lucide="check-circle" class="w-10 h-10 mb-2 text-emerald-500"></i><p class="text-sm italic text-slate-400">全數分配完畢</p></div>' : ''}
+                        </div>
+                    </div>
+                `;
+
+                // 右欄：選手卡片
+                html += `<div class="lg:col-span-3 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-5">`;
+                
+                alivePlayers.forEach(player => {
+                    const votersForThis = appState.voters.filter(v => v.votedFor === player.id);
+                    const cardAction = selectedVoterId ? `onclick="window.assignVoteToPlayer('${player.id}')"` : '';
+                    const selectableClass = selectedVoterId ? 'selectable border-amber-500/50 bg-slate-800/80 cursor-pointer' : 'border-slate-700 bg-slate-800/40';
+
+                    html += `
+                        <div ${cardAction} class="player-card p-5 rounded-2xl border transition-all ${selectableClass} shadow-lg relative overflow-hidden group">
+                            <!-- 裝飾背景色塊 -->
+                            <div class="absolute top-0 right-0 w-24 h-24 bg-purple-500/10 rounded-full blur-2xl -mr-10 -mt-10 pointer-events-none"></div>
+
+                            <div class="flex justify-between items-center mb-5 border-b border-slate-700/50 pb-4 relative z-10">
+                                <span class="font-black text-lg text-white flex items-center">
+                                    <div class="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center mr-3 shadow-md">
+                                        <i data-lucide="user" class="w-4 h-4 text-white"></i>
+                                    </div>
+                                    ${player.name}
+                                </span>
+                                <span class="text-xs bg-indigo-500/20 text-indigo-300 px-2.5 py-1 rounded-full font-black border border-indigo-500/30">
+                                    ${votersForThis.length} 票
+                                </span>
+                            </div>
+                            
+                            <div class="min-h-[80px] bg-slate-900/60 rounded-xl p-3 flex flex-wrap gap-2 content-start border border-slate-700/50 relative z-10">
+                                ${votersForThis.length === 0 ? '<span class="text-xs text-slate-500 italic mt-2 ml-2 flex items-center"><i data-lucide="ghost" class="w-3 h-3 mr-1"></i> 尚無人看好</span>' : ''}
+                                ${votersForThis.map(v => `
+                                    <div class="flex items-center bg-slate-700/80 border border-slate-600 text-slate-200 text-xs px-2.5 py-1 rounded-lg group/btn shadow-sm">
+                                        <span class="font-medium">${v.name}</span>
+                                        <button onclick="event.stopPropagation(); window.removeVote('${v.id}')" class="ml-2 text-slate-400 hover:text-rose-400 hover:bg-rose-400/10 rounded p-0.5 focus:outline-none transition-colors">
+                                            <i data-lucide="x" class="w-3 h-3"></i>
+                                        </button>
+                                    </div>
+                                `).join('')}
+                            </div>
+                            
+                            ${selectedVoterId ? `
+                                <div class="absolute inset-0 bg-amber-500/5 border-2 border-amber-500/50 rounded-2xl pointer-events-none flex items-end justify-center pb-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    <span class="text-xs text-amber-400 font-bold bg-slate-900/80 px-3 py-1 rounded-full"><i data-lucide="mouse-pointer-click" class="w-3 h-3 inline mr-1"></i> 分配至此</span>
+                                </div>
+                            ` : ''}
+                        </div>
+                    `;
+                });
+
+                html += `</div></div>`;
+
+            } else {
+                html += `
+                    <div class="glass-panel p-12 rounded-3xl border border-slate-700 flex flex-col items-center justify-center text-center">
+                        <div class="bg-slate-800 p-5 rounded-full mb-6 border border-slate-700 shadow-xl relative">
+                            <i data-lucide="lock" class="w-12 h-12 text-slate-500"></i>
+                            <i data-lucide="sparkles" class="w-6 h-6 text-amber-500 absolute -top-1 -right-1 animate-pulse"></i>
+                        </div>
+                        <h3 class="text-3xl font-black text-white mb-3 tracking-wide">投票分配尚未解鎖</h3>
+                        <p class="text-slate-400 mb-8 max-w-md">目前勝部還有 <strong class="text-indigo-400 text-lg">${alivePlayers.length}</strong> 名選手。<br>請至「賽程看板」繼續推進比賽至 8 強以內。</p>
+                        
+                        <div class="w-full max-w-2xl bg-slate-900/50 p-6 rounded-2xl border border-slate-700 text-left shadow-inner">
+                            <p class="text-sm text-slate-400 font-bold mb-4 border-b border-slate-700/50 pb-3 flex items-center">
+                                <i data-lucide="check-circle" class="w-4 h-4 mr-2 text-emerald-500"></i> 已就緒名單 (${appState.voters.length} 人)
+                            </p>
+                            <div class="flex flex-wrap gap-2">
+                                ${appState.voters.map(v => `<span class="px-2.5 py-1 bg-slate-800 text-slate-400 text-xs rounded-lg border border-slate-700 shadow-sm font-medium">${v.name}</span>`).join('')}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            html += `</div>`;
+            return html;
+        }
+
+        // 啟動應用
+        initApp();
+
+    </script>
+</body>
+</html>
