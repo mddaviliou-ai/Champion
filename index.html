@@ -947,7 +947,7 @@
                 let actionBtn = '';
                 if (!isCompleted) {
                     actionBtn = `
-                        <button onclick="event.stopPropagation(); window.removePlayerFromMatch('${match.id}', '${player.id}')" class="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-rose-500/20 text-rose-400 rounded-md transition-all absolute right-2">
+                        <button onclick="event.stopPropagation(); window.removePlayerFromMatch('${match.id}', '${player.id}')" title="將選手移回待分配區" class="p-1.5 hover:bg-rose-500/20 text-rose-400 rounded-md transition-all">
                             <i data-lucide="user-minus" class="w-4 h-4"></i>
                         </button>
                     `;
@@ -956,9 +956,12 @@
                 cardHtml += `
                     <div ${clickEvent} class="flex items-center p-2.5 rounded-xl border transition-all ${boxStyles} group relative overflow-hidden">
                         ${iconHtml}
-                        <span class="flex-grow text-sm font-medium truncate pr-8">${player.name}</span>
-                        ${!isCompleted && !selectedPlayerId ? `<span class="opacity-0 group-hover:opacity-100 text-[10px] font-bold bg-blue-500 text-white px-2 py-1 rounded-md ml-2 transition-opacity absolute right-2">勝</span>` : ''}
-                        ${actionBtn}
+                        <span class="flex-grow text-sm font-medium truncate pr-24">${player.name}</span>
+                        
+                        <div class="absolute right-2 flex items-center space-x-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                            ${!isCompleted && !selectedPlayerId ? `<span class="text-[10px] font-bold bg-blue-500 text-white px-2 py-1 rounded-md shadow-sm">勝</span>` : ''}
+                            ${actionBtn}
+                        </div>
                     </div>
                 `;
             });
